@@ -1,0 +1,11 @@
+
+--- television.py ---
+
+This is a random collection of python and gnuradio-companion scripts
+for experimenting with transmitting video in a number of analogue /
+semi-digital formats.
+
+Requires python3 and ffmpeg.
+
+-Phil <phil@sanslogic.co.uk>
+
