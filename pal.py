@@ -5,7 +5,7 @@ import numpy as np
 import subprocess as sp
 #import random
 
-pixel_clock = 16e6
+pixel_clock = 20e6
 fps = 25
 frame_height = 625
 coloursub_freq = 4433618.75
