@@ -161,8 +161,8 @@ class dmac_encode:
                 bits += self.bits(self.clamp)
             
             elif line == 625:
-                bits += self.bits(self.runin, (self.frame + 1) & 1) # CRI Clock run in (32 bits)
-                bits += self.bits(self.vsync, (self.frame + 1) & 1) # FSW Frame sync word (64 bits)
+                bits += self.bits(self.runin, self.frame & 1) # CRI Clock run in (32 bits)
+                bits += self.bits(self.vsync, self.frame & 1) # FSW Frame sync word (64 bits)
                 bits += self.rbits({ 'len': 5, 'code': 0b10101 })   # UDF Unified date and time (5 bits)
                 
                 # SDF
