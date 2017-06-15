@@ -20,11 +20,24 @@ class dmac_encode:
     # Frame counter
     frame = 0
     
+    # Continuity counter
+    cc = 0
+    
     # Duobinary mark (1) polarity
     dub_p = -1
     
     # PRNG poly
     poly = 0x1FFF
+    
+    # Line PRNs
+    line_prn = []
+    
+    def __init__(self):
+        # Generate the noise frame
+        noise = [self.prng() for _ in range(0, 648 * 625 - 6)]
+        
+        # Keep just the parts we need
+        self.line_prn = [noise[y * 648:y * 648 + 99] for y in range(0, 623)]
     
     def prng(self):
         b  = self.poly & 1
@@ -72,11 +85,46 @@ class dmac_encode:
         
         return code
     
+    def interleave(self, packet):
+        pkt = [0] * 751
+        
+        y = 0
+        for x in range(0, 751):
+            pkt[x] = packet[y]
+            
+            y += 94
+            
+            if y >= 751:
+                y -= 751
+        
+        return pkt
+    
     def mkframe(self, image):
         
         self.frame += 1
         samples = []
         
+        # Dummy packets
+        packets = []
+        for x in range(0, 82):
+            # Generate the header
+            pkt  = "{0:010b}".format(1023)[::-1]       # Channel
+            pkt += "{0:02b}".format(self.cc & 3)[::-1] # Continuity
+            pkt  = self.bch_encode(int(pkt, 2), 23, 12)
+            pkt  = self.bits({ 'len': 23, 'code': pkt })
+            
+            # Generate the dummy data
+            pkt += [0] * 728
+            
+            # Interleave packet
+            pkt = self.interleave(pkt)
+            
+            # Increment the cc
+            self.cc += 1
+            
+            # Append the packet to the list for this frame
+            packets += pkt
+            
         for line in range(1, self.height + 1):
             
             ### Digital Bits ###
@@ -85,8 +133,12 @@ class dmac_encode:
             bits = self.bits(self.hsync, (self.frame + 1) & 1)
             
             if line <= 623:
-                # Lines 1 - 623 hold packets. Fill with random data for now.
-                bits += [self.prng() for x in range(0, 99)]
+                # Lines 1 - 623 hold packets
+                lb = packets[:99] + [0] * (105 - len(bits))
+                lb = [a ^ b for a, b in zip(lb, self.line_prn[line - 1])]
+                
+                bits += lb
+                packets = packets[99:]
             
             elif line == 624:
                 # Line 624 contains 67 spare bits and the 32-bit clamp marker
