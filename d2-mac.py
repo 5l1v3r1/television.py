@@ -130,7 +130,22 @@ class dmac_encode:
             ### Digital Bits ###
             
             # All lines begin with the line sync word
-            bits = self.bits(self.hsync, (self.frame + 1) & 1)
+            if line <= 622:
+                # Lines 1-622 alternate between inverted and true
+                # With line 1 on an even frame being true, and
+                # line 1 on an odd frame being inverted.
+                inv = (self.frame + line) & 1
+            
+            elif line == 623:
+                # Line 623 is on an even frame is inverted
+                inv = self.frame & 1
+            
+            else:
+                # Line 624 and 625 are true on an even frame,
+                # and inverted on an odd frame
+                inv = (self.frame + 1) & 1
+            
+            bits = self.bits(self.hsync, inv)
             
             if line <= 623:
                 # Lines 1 - 623 hold packets
