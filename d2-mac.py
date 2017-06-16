@@ -27,7 +27,7 @@ class dmac_encode:
     dub_p = -1
     
     # PRNG poly
-    poly = 0x1FFF
+    poly = 0x7FFF
     
     # Line PRNs
     line_prn = []
