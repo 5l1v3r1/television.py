@@ -50,7 +50,10 @@ class dmac_encode:
     
     def bch_encode(self, code, n, k):
         
-        g = 0b100001101110111
+        if n == 23:
+            g = 0b110001110101
+        else:
+            g = 0b100001101110111
         
         code <<= (n - k)
         c = code
