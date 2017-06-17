@@ -12,7 +12,7 @@ class dmac_encode:
     fps    = 25
     height = 625
     width  = int(clock / height / fps) # 1296
-    hsync  = { 'len': 7, 'code': 0b0001011 }
+    hsync  = { 'len': 6, 'code': 0b001011 }
     runin  = { 'len': 32, 'code': 0x55555555 }
     vsync  = { 'len': 64, 'code': 0x65AEF3153F41C246 }
     clamp  = { 'len': 32, 'code': 0xEAF3927F }
@@ -20,11 +20,24 @@ class dmac_encode:
     # Frame counter
     frame = 0
     
+    # Continuity counter
+    cc = 0
+    
     # Duobinary mark (1) polarity
     dub_p = -1
     
     # PRNG poly
-    poly = 0x1FFF
+    poly = 0x7FFF
+    
+    # Line PRNs
+    line_prn = []
+    
+    def __init__(self):
+        # Generate the noise frame
+        noise = [False] * 7 + [self.prng() for _ in range(0, 1296 * 625 - 7)]
+        
+        # Split it into lines
+        self.line_prn = [noise[y * 1296:y * 1296 + 1296] for y in range(0, 625)]
     
     def prng(self):
         b  = self.poly & 1
@@ -37,7 +50,10 @@ class dmac_encode:
     
     def bch_encode(self, code, n, k):
         
-        g = 0b100001101110111
+        if n == 23:
+            g = 0b110001110101
+        else:
+            g = 0b100001101110111
         
         code <<= (n - k)
         c = code
@@ -69,166 +85,174 @@ class dmac_encode:
         
         return code
     
+    def interleave(self, packet):
+        pkt = [0] * 751
+        
+        y = 0
+        for x in range(0, 751):
+            pkt[x] = packet[y]
+            
+            y += 94
+            
+            if y >= 751:
+                y -= 751
+        
+        return pkt
+    
     def mkframe(self, image):
         
         self.frame += 1
         samples = []
         
+        # Dummy packets
+        packets = []
+        for x in range(0, 82):
+            # Generate the header
+            pkt  = "{0:010b}".format(1023)[::-1]       # Channel
+            pkt += "{0:02b}".format(self.cc & 3)[::-1] # Continuity
+            pkt  = self.bch_encode(int(pkt, 2), 23, 12)
+            pkt  = self.bits({ 'len': 23, 'code': pkt })
+            
+            # Generate the dummy data
+            pkt += [0] * 728
+            
+            # Interleave packet
+            pkt = self.interleave(pkt)
+            
+            # Increment the cc
+            self.cc += 1
+            
+            # Append the packet to the list for this frame
+            packets += pkt
+        
         for line in range(1, self.height + 1):
             
-            if line < 622:
-                #bits  = [0]
-                bits  = self.bits(self.hsync, (self.frame + line + 1) & 1)
-                bits += [self.prng() for x in range(0, 198)]
-                bits += [0]
-                
-                # Calculate the active line
-                if 24 <= line <= 310:
-                    iy = (line - 24) * 2 + 1
-                
-                elif 336 <= line <= 622:
-                    iy = (line - 336) * 2
-                
-                else:
-                    iy = -1
-                
-                # Draw the line
-                if iy >= 0:
-                    
-                    chrominance = []
-                    luminance = []
-                    
-                    o = iy * 697 * 3
-                    
-                    for ix in range(0, 697):
-                        r, g, b = image[o:o + 3]
-                        o += 3
-                        
-                        r = r / 255.0
-                        g = g / 255.0
-                        b = b / 255.0
-                        
-                        y = 0.299 * r + 0.587 * g + 0.144 * b
-                        
-                        if ix & 1:
-                            if line & 1:
-                                u = 0.733 * (b - y)
-                                chrominance += [u / 2]
-                            
-                            else:
-                                v = 0.927 * (r - y)
-                                chrominance += [v / 2]
-                        
-                        luminance += [y - 0.5]
-                    
-                    # Pad out chrominance
-                    chrominance += [0]
-                
-                elif line == 23 or line == 335:
-                    chrominance = [0] * 349
-                    luminance = [-0.5] * 697
-                    
-                else:
-                    chrominance = [0] * 349
-                    luminance = [0] * 697
-                
-                samples += self.duobinary(bits, 0.4) #    1 -  206: 206 clock periods for data burst (1 bit run-in, 6 bits line sync, 198 data bits, 1 spare bit)
-                samples += [0] * 4                   #  207 -  210: 4 clock periods for transition rom end of data
-                samples += [0] * 15                  #  211 -  225: 15 clock periods - clamp period (0.5 V)
-                samples += [0] * 10                  #  226 -  235: 10 clock periods for weighted transition to colour-difference signal
-                samples += chrominance               #  236 -  584: 349 clock periods for colour-difference component
-                samples += [0] * 5                   #  585 -  589: 5 clock periods for weighted transition between colour-difference signal and luminance signal
-                samples += luminance                 #  590 - 1286: 697 clock periods for luminance signal
-                samples += [0] * 6                   # 1287 - 1292: 6 clock periods for weighted transition from luminance signal
-                samples += [0] * 4                   # 1293 - 1296: 4 clock periods for transition into data, including one run-in bit
+            ### Digital Bits ###
             
-            elif line == 622:
-                #bits  = [0]
-                bits  = self.bits(self.hsync, (self.frame + 1) & 1)
-                bits += [self.prng() for x in range(0, 198)]
-                bits += [0]
-                
-                samples += self.duobinary(bits, 0.4) # 1 - 206
-                samples += [0] * (1296 - len(bits))
+            # All lines begin with the line sync word
+            if line <= 622:
+                # Lines 1-622 alternate between inverted and true
+                # With line 1 on an even frame being true, and
+                # line 1 on an odd frame being inverted.
+                inv = (self.frame + line) & 1
             
             elif line == 623:
-                #bits  = [0]
-                bits  = self.bits(self.hsync, (self.frame + 1) & 1)
-                bits += [self.prng() for x in range(0, 198)]
-                bits += [0]
-                
-                samples += self.duobinary(bits, 0.4) # 1 - 206
-                samples += [0] * (1296 - len(bits))
-            
-            elif line == 624:
-                #bits  = [0]
-                bits  = self.bits(self.hsync, (self.frame) & 1)
-                bits += self.rbits({ 'len': 167, 'code': 0x55555555555555555555555555555555555555555555 })
-                bits += self.bits(self.clamp)
-                #bits += [0] * (206 - len(bits))
-                
-                samples += self.duobinary(bits, 0.4) # 1 - 206
-                samples += [0] * 3                   # 207 - 209
-                samples += [0] * 162                 # 210 - 371 Grey reference
-                samples += [0.5] * 162               # 372 - 533 White reference
-                samples += [-0.5] * 162              # 534 - 695 Black reference
-                samples += [0] * 601                 # 696 - 1296 TODO: wobulation
+                # Line 623 is on an even frame is inverted
+                inv = self.frame & 1
             
             else:
-                #bits  = [0]
-                bits  = self.bits(self.hsync, (self.frame) & 1)      # LSW Line sync word (6 bits)
-                bits += self.bits(self.runin, (self.frame + 1) & 1)  # CRI Clock run in (32 bits)
-                bits += self.bits(self.vsync, (self.frame + 1) & 1)  # FSW Frame sync word (64 bits)
+                # Line 624 and 625 are true on an even frame,
+                # and inverted on an odd frame
+                inv = (self.frame + 1) & 1
+            
+            bits = [1] + self.bits(self.hsync, inv)
+            
+            if line <= 623:
+                # Lines 1 - 623 hold packets
+                lb  = packets[:99] + packets[:99]
+                lb += [False] * (199 - len(lb))
+                lb = [a ^ b for a, b in zip(lb, self.line_prn[line - 1][7:])]
                 
-                # For D-MAC (not D2-MAC) the bits in idits are interleaved with random data
-                ibits = self.rbits({ 'len': 5, 'code': 0b10101 })     # UDF Unified date and time (5 bits)
+                bits += lb
+                packets = packets[99:]
+            
+            elif line == 624:
+                # Line 624 contains 167 spare bits and the 32-bit clamp marker
+                bits += [1, 0] * 83 + [1]
+                bits += self.bits(self.clamp)
+            
+            elif line == 625:
+                bits += self.bits(self.runin, self.frame & 1) # CRI Clock run in (32 bits)
+                bits += self.bits(self.vsync, self.frame & 1) # FSW Frame sync word (64 bits)
                 
-                f  = "{0:016b}".format(0x5A5A)[::-1]    # CHID Channel identification (16 bits)
-                f += "{0:08b}".format(0b00000000)[::-1] # SDFSCR Services configuration reference
-                f += "{0:08b}".format(0b00111111)[::-1] # MVSCG Multiplex and video scrambling control
-                                                        # bei 4/3 aspect ratio (standard)
-                f += "{0:020b}".format((self.frame >> 8) & 0xFFFFF)[::-1]   # CAFCNT Conditional access frame count (20 bits)
-                f += "{0:05b}".format(0b11111)[::-1]    # Unallocated
+                # For D-MAC (not D2-MAC) the bits in ibits are interleaved with random data
+                ibits = self.rbits({ 'len': 5, 'code': 0b10101 })   # UDF Unified date and time (5 bits)
                 
-                # Convert to integer and apply BCH code
-                f  = self.bch_encode(int(f, 2), 71, 57)
-                
-                # Apply to the frame
-                ibits += self.bits({ 'len': 71, 'code': f })
-                #bits += self.bits({ 'len': 14, 'code': 0b10101001001000 })
+                # SDF
+                sdf  = "{0:016b}".format(0x5A5A)[::-1]    # CHID Channel identification (16 bits)
+                sdf += "{0:08b}".format(0b00000000)[::-1] # SDFSCR Services configuration reference
+                sdf += "{0:08b}".format(0b00111111)[::-1] # MVSCG Multiplex and video scrambling control
+                                                          # bei 4/3 aspect ratio (standard)
+                sdf += "{0:020b}".format((self.frame >> 8) & 0xFFFFF)[::-1] # CAFCNT Conditional access frame count (20 bits)
+                sdf += "{0:05b}".format(0b11111)[::-1]    # Unallocated
+                sdf  = self.bch_encode(int(sdf, 2), 71, 57)
+                ibits += self.bits({ 'len': 71, 'code': sdf })
                 
                 # RDF Repeated data frames:
                 for b in range(0, 5):
-                    
-                    # Build up the frame
-                    f  = "{0:08b}".format(self.frame & 0xFF)[::-1] # FCNT (8 bits)
-                    f += "{0:01b}".format(0)[::-1]                 # UDF (1 bit)
-                    f += "{0:08b}".format(0x00000000)[::-1]        # TDMCID (8 bits)
-                    f += "{0:010b}".format(0x3FF)[::-1]            # FLN1 (10 bits)
-                    f += "{0:010b}".format(0x3FF)[::-1]            # LLN1 (10 bits)
-                    f += "{0:010b}".format(0x3FF)[::-1]            # FLN2 (10 bits)
-                    f += "{0:010b}".format(0x3FF)[::-1]            # LLN2 (10 bits)
-                    f += "{0:011b}".format(0x7FF)[::-1]            # FCP (11 bits)
-                    f += "{0:011b}".format(0x7FF)[::-1]            # FCP (11 bits)
-                    f += "{0:01b}".format(self.frame & 1)[::-1]                 # LINKS (1 bit)
-                    
-                    # Convert to integer and apply BCH code
-                    f  = self.bch_encode(int(f, 2), 94, 80)
-                    
-                    # Apply to the frame
-                    ibits += self.bits({ 'len': 94, 'code': f })
-                    #f += self.bits({ 'len': 14, 'code': 0b10101101000011 })
+                    rdf  = "{0:08b}".format(self.frame & 0xFF)[::-1] # FCNT (8 bits)
+                    rdf += "{0:01b}".format(0)[::-1]                 # UDF (1 bit)
+                    rdf += "{0:08b}".format(0x00000000)[::-1]        # TDMCID (8 bits)
+                    rdf += "{0:010b}".format(0x3FF)[::-1]            # FLN1 (10 bits)
+                    rdf += "{0:010b}".format(0x3FF)[::-1]            # LLN1 (10 bits)
+                    rdf += "{0:010b}".format(0x3FF)[::-1]            # FLN2 (10 bits)
+                    rdf += "{0:010b}".format(0x3FF)[::-1]            # LLN2 (10 bits)
+                    rdf += "{0:011b}".format(0x7FF)[::-1]            # FCP (11 bits)
+                    rdf += "{0:011b}".format(0x7FF)[::-1]            # FCP (11 bits)
+                    rdf += "{0:01b}".format(self.frame & 1)[::-1]                 # LINKS (1 bit)
+                    rdf  = self.bch_encode(int(rdf, 2), 94, 80)
+                    ibits += self.bits({ 'len': 94, 'code': rdf })
                 
-                # Interleave ibits with random data
-                rbits = [self.prng() for x in range(0, len(ibits))]
-                bits += [_ for _ in zip(ibits, rbits) for _ in _]
-                
-                bits += [self.prng() for x in range(0, self.width - len(bits))]
-                #bits += self.bits({'code': 0, 'len': self.width - len(bits)})
-                
-                # Write the duoencoded bits to the output
-                samples += self.duobinary(bits, 0.4) # 1 - 1296
+                bits += [_ for _ in zip(ibits, self.line_prn[624][104::2]) for _ in _]
             
+            l  = self.duobinary(bits, 0.4)
+            l += [0] * (1296 - len(bits))
+            
+            ### Analogue Bits ###
+            
+            iy = -1
+            
+            if 24 <= line <= 310:
+                iy = (line - 24) * 2 + 1
+            
+            elif 336 <= line <= 622:
+                iy = (line - 336) * 2
+            
+            # Draw the line
+            if iy != -1:
+                
+                o = iy * 697 * 3
+                
+                for ix in range(0, 697):
+                    r, g, b = image[o:o + 3]
+                    o += 3
+                    
+                    r = r / 255.0
+                    g = g / 255.0
+                    b = b / 255.0
+                    
+                    y = 0.299 * r + 0.587 * g + 0.144 * b
+                    
+                    if ix & 1:
+                        if line & 1:
+                            u = 0.733 * (b - y)
+                            l[236 + ix // 2] += u / 2
+                        
+                        else:
+                            v = 0.927 * (r - y)
+                            l[236 + ix // 2] += v / 2
+                        
+                    l[590 + ix] = y - 0.5
+            
+            # Lines 23 and 335 must have a black luminance area
+            if line == 23 or line == 335:
+                for ix in range(0, 697):
+                    l[590 + ix] = -0.5
+            
+            # Line 624 contains the reference levels
+            if line == 624:
+                # 372 - 533 White Reference
+                for ix in range(372, 534):
+                    l[ix] = 0.5
+                
+                # 534 - 695 Black Reference
+                for ix in range(534, 696):
+                    l[ix] = -0.5
+                
+                # 696 - 1296 TODO: wobulation
+            
+            samples += l
+        
         return samples
 
 # ffmpeg import
